@@ -304,88 +304,94 @@ export default function PathfindingPlayground() {
     setAnimIndex(0);
   };
 
-  const run = () => {
-    clearPath();
-    if (!start || !end) {
-      alert("Please set both Start and End.");
-      return;
-    }
+const run = () => {
+  clearPath();
+  if (!start || !end) {
+    alert("Please set both Start and End.");
+    return;
+  }
 
-    if (visitOrder === "as-clicked") {
-      const points: Coord[] = [start, ...required, end];
-      let accum: Coord[] = [];
-      const visitedGlobal = new Set<CellKey>([key(start.r, start.c)]);
-      for (let i = 0; i < points.length - 1; i++) {
-        const s = points[i];
-        const g = points[i + 1];
-        const forbid = allowRevisit ? undefined : new Set(visitedGlobal);
-        if (!allowRevisit && forbid) {
-          forbid.delete(key(s.r, s.c));
-          if (forbid.has(key(g.r, g.c))) {
-            alert(`Target of segment ${i + 1} was already visited and revisiting is disabled.`);
-            return;
-          }
-        }
-        const res = bfs(n, blocked, s, g, forbid);
-        if (!res.path) {
-          alert(`No path between segment ${i + 1}. Make sure it's reachable.`);
-          return;
-        }
-        if (i === 0) accum = res.path;
-        else accum = [...accum, ...res.path.slice(1)];
-        if (!allowRevisit) for (const p of res.path) visitedGlobal.add(key(p.r, p.c));
-      }
-      setPath(accum);
-      return;
+  // helper to build a forbid set when no-revisit is enabled
+  const buildForbid = (visitedGlobal: Set<CellKey>, sequence: Coord[], i: number) => {
+    // i = current segment index, moving sequence[i] -> sequence[i+1]
+    const s = sequence[i], g = sequence[i + 1];
+    const forbid = new Set<CellKey>(visitedGlobal);
+    // forbid all FUTURE special nodes (remaining required + final end)
+    for (let j = i + 1; j < sequence.length; j++) {
+      forbid.add(key(sequence[j].r, sequence[j].c));
     }
-
-    const opt = optimizeOrder(n, blocked, start, required, end);
-    if (!("order" in opt) || !opt.order) {
-      alert(opt.reason || "Optimization failed.");
-      return;
-    }
-
-    if (allowRevisit) {
-      try {
-        const p = concatPaths(opt.pairPaths, opt.order);
-        setPath(p);
-      } catch {
-        let accum: Coord[] = [];
-        for (let i = 0; i < opt.order.length - 1; i++) {
-          const res = bfs(n, blocked, opt.order[i], opt.order[i + 1]);
-          if (!res.path) {
-            alert("A segment in optimized order is unreachable.");
-            return;
-          }
-          if (i === 0) accum = res.path;
-          else accum = [...accum, ...res.path.slice(1)];
-        }
-        setPath(accum);
-      }
-    } else {
-      let accum: Coord[] = [];
-      const visitedGlobal = new Set<CellKey>([key(start.r, start.c)]);
-      for (let i = 0; i < opt.order.length - 1; i++) {
-        const s = opt.order[i];
-        const g = opt.order[i + 1];
-        const forbid = new Set<CellKey>(visitedGlobal);
-        forbid.delete(key(s.r, s.c));
-        if (forbid.has(key(g.r, g.c))) {
-          alert("Optimized order requires revisiting a cell, which is disabled.");
-          return;
-        }
-        const res = bfs(n, blocked, s, g, forbid);
-        if (!res.path) {
-          alert("A segment in optimized order is unreachable under no-revisit constraint.");
-          return;
-        }
-        if (i === 0) accum = res.path;
-        else accum = [...accum, ...res.path.slice(1)];
-        for (const p of res.path) visitedGlobal.add(key(p.r, p.c));
-      }
-      setPath(accum);
-    }
+    // allow leaving the source and arriving at the current target
+    forbid.delete(key(s.r, s.c));
+    forbid.delete(key(g.r, g.c));
+    return forbid;
   };
+
+  if (visitOrder === "as-clicked") {
+    const sequence: Coord[] = [start, ...required, end];
+    let accum: Coord[] = [];
+    const visitedGlobal = new Set<CellKey>([key(start.r, start.c)]);
+
+    for (let i = 0; i < sequence.length - 1; i++) {
+      const s = sequence[i], g = sequence[i + 1];
+      const forbid = allowRevisit ? undefined : buildForbid(visitedGlobal, sequence, i);
+
+      const res = bfs(n, blocked, s, g, forbid);
+      if (!res.path) {
+        alert(`No path for segment ${i + 1} under current constraints.`);
+        return;
+      }
+      if (i === 0) accum = res.path;
+      else accum = [...accum, ...res.path.slice(1)];
+
+      if (!allowRevisit) for (const p of res.path) visitedGlobal.add(key(p.r, p.c));
+    }
+    setPath(accum);
+    return;
+  }
+
+  // optimize order (Held–Karp); still compute segments with the same no-revisit constraints
+  const opt = optimizeOrder(n, blocked, start, required, end);
+  if (!("order" in opt) || !opt.order) {
+    alert(opt.reason || "Optimization failed.");
+    return;
+  }
+
+  if (allowRevisit) {
+    try {
+      const p = concatPaths(opt.pairPaths, opt.order);
+      setPath(p);
+    } catch {
+      let accum: Coord[] = [];
+      for (let i = 0; i < opt.order.length - 1; i++) {
+        const res = bfs(n, blocked, opt.order[i], opt.order[i + 1]);
+        if (!res.path) {
+          alert("A segment in optimized order is unreachable.");
+          return;
+        }
+        if (i === 0) accum = res.path; else accum = [...accum, ...res.path.slice(1)];
+      }
+      setPath(accum);
+    }
+  } else {
+    let accum: Coord[] = [];
+    const visitedGlobal = new Set<CellKey>([key(start.r, start.c)]);
+
+    for (let i = 0; i < opt.order.length - 1; i++) {
+      const s = opt.order[i], g = opt.order[i + 1];
+      const forbid = buildForbid(visitedGlobal, opt.order, i);
+
+      const res = bfs(n, blocked, s, g, forbid);
+      if (!res.path) {
+        alert("No path under no-revisit constraint for the optimized order.");
+        return;
+      }
+      if (i === 0) accum = res.path; else accum = [...accum, ...res.path.slice(1)];
+      for (const p of res.path) visitedGlobal.add(key(p.r, p.c));
+    }
+    setPath(accum);
+  }
+};
+
 
   const exportState = () => {
     const state = {
