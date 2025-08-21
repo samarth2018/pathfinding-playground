@@ -72,7 +72,8 @@ function bfs(
   return { path: null, visited: order };
 }
 
-function optimizeOrder(
+/* ---- Optimize order when revisits ARE allowed: Held–Karp DP over pairwise BFS ---- */
+function optimizeOrderRevisitsOK(
   n: number,
   blocked: Set<CellKey>,
   start: Coord,
@@ -107,7 +108,6 @@ function optimizeOrder(
   if (R === 0) return { order: [start, end], pairPaths };
 
   const dp = new Map<string, { cost: number; prev: number | null }>();
-
   for (let i = 1; i <= R; i++) {
     const m = 1 << (i - 1);
     dp.set(`${m},${i}`, { cost: dist[0][i], prev: 0 });
@@ -116,17 +116,15 @@ function optimizeOrder(
   for (let mask = 1; mask < 1 << R; mask++) {
     for (let i = 1; i <= R; i++) {
       if (!(mask & (1 << (i - 1)))) continue;
-      const keyDP = `${mask},${i}`;
-      const state = dp.get(keyDP);
+      const state = dp.get(`${mask},${i}`);
       if (!state) continue;
       for (let j = 1; j <= R; j++) {
         if (mask & (1 << (j - 1))) continue;
         const nextMask = mask | (1 << (j - 1));
         const newCost = state.cost + dist[i][j];
-        const k2 = `${nextMask},${j}`;
-        const cur = dp.get(k2);
+        const cur = dp.get(`${nextMask},${j}`);
         if (isFinite(newCost) && (!cur || newCost < cur.cost)) {
-          dp.set(k2, { cost: newCost, prev: i });
+          dp.set(`${nextMask},${j}`, { cost: newCost, prev: i });
         }
       }
     }
@@ -164,25 +162,110 @@ function optimizeOrder(
   return { order, pairPaths };
 }
 
+/* ---- Concatenate precomputed pairPaths for a chosen order ---- */
 function concatPaths(pairPaths: Map<string, Coord[]>, order: Coord[]): Coord[] {
-  const path: Coord[] = [];
+  const out: Coord[] = [];
   for (let i = 0; i < order.length - 1; i++) {
     const a = order[i];
     const b = order[i + 1];
     let seg: Coord[] | undefined = undefined;
     for (const [, v] of pairPaths.entries()) {
-      const ia = v.length ? v[0] : null;
-      const ib = v.length ? v[v.length - 1] : null;
-      if (ia && ib && ia.r === a.r && ia.c === a.c && ib.r === b.r && ib.c === b.c) {
+      const ia = v[0];
+      const ib = v[v.length - 1];
+      if (ia.r === a.r && ia.c === a.c && ib.r === b.r && ib.c === b.c) {
         seg = v;
         break;
       }
     }
     if (!seg) throw new Error("Missing segment in pairPaths");
-    if (i === 0) path.push(...seg);
-    else path.push(...seg.slice(1));
+    if (i === 0) out.push(...seg);
+    else out.push(...seg.slice(1));
   }
-  return path;
+  return out;
+}
+
+/* ---- Helpers for no-revisit mode ---- */
+function buildForbid(visitedGlobal: Set<CellKey>, sequence: Coord[], i: number) {
+  const s = sequence[i], g = sequence[i + 1];
+  const forbid = new Set<CellKey>(visitedGlobal);
+  for (let j = i + 1; j < sequence.length; j++) forbid.add(key(sequence[j].r, sequence[j].c));
+  forbid.delete(key(s.r, s.c));
+  forbid.delete(key(g.r, g.c));
+  return forbid;
+}
+
+function* permutations<T>(arr: T[]): Generator<T[]> {
+  const a = arr.slice();
+  const n = a.length;
+  const c = Array(n).fill(0);
+  yield a.slice();
+  let i = 0;
+  while (i < n) {
+    if (c[i] < i) {
+      if (i % 2 === 0) [a[0], a[i]] = [a[i], a[0]];
+      else [a[c[i]], a[i]] = [a[i], a[c[i]]];
+      yield a.slice();
+      c[i] += 1;
+      i = 0;
+    } else {
+      c[i] = 0;
+      i += 1;
+    }
+  }
+}
+
+/* ---- Optimize order when revisits are NOT allowed: exact search over waypoint orders ---- */
+function optimizeOrderNoRevisit(
+  n: number,
+  blocked: Set<CellKey>,
+  start: Coord,
+  required: Coord[],
+  end: Coord
+): { order: Coord[]; path: Coord[] } | null {
+  const R = required.length;
+  if (R === 0) {
+    const seg = bfs(n, blocked, start, end, new Set([key(start.r, start.c)]));
+    return seg.path ? { order: [start, end], path: seg.path } : null;
+  }
+
+  // Hard cap for combinatorics; adjust as desired
+  if (R > 9) {
+    alert("Too many required waypoints for exact no-revisit optimization (max 9). Try fewer waypoints or enable revisiting.");
+    return null;
+  }
+
+  let bestPath: Coord[] | null = null;
+  let bestOrder: Coord[] | null = null;
+
+  for (const perm of permutations(required)) {
+    const sequence = [start, ...perm, end];
+    const visitedGlobal = new Set<CellKey>([key(start.r, start.c)]);
+    let ok = true;
+    let accum: Coord[] = [];
+
+    for (let i = 0; i < sequence.length - 1; i++) {
+      const s = sequence[i], g = sequence[i + 1];
+      const forbid = buildForbid(visitedGlobal, sequence, i);
+      const res = bfs(n, blocked, s, g, forbid);
+      if (!res.path) {
+        ok = false;
+        break;
+      }
+      if (i === 0) accum = res.path;
+      else accum = [...accum, ...res.path.slice(1)];
+      for (const p of res.path) visitedGlobal.add(key(p.r, p.c));
+    }
+
+    if (ok) {
+      if (!bestPath || accum.length < bestPath.length) {
+        bestPath = accum;
+        bestOrder = sequence;
+      }
+    }
+  }
+
+  if (bestPath && bestOrder) return { order: bestOrder, path: bestPath };
+  return null;
 }
 
 export default function PathfindingPlayground() {
@@ -229,19 +312,18 @@ export default function PathfindingPlayground() {
     [visiblePath]
   );
 
-  const arrowMap = useMemo(() => {
-    const m = new Map<CellKey, string>();
+  // map each step's FROM-cell -> rotation degrees for an SVG arrow (base points right)
+  const arrowDeg = useMemo(() => {
+    const m = new Map<CellKey, number>();
     for (let i = 0; i < visiblePath.length - 1; i++) {
       const a = visiblePath[i];
       const b = visiblePath[i + 1];
       const dr = b.r - a.r;
       const dc = b.c - a.c;
-      let arrow = "";
-      if (dr === -1 && dc === 0) arrow = "↑";
-      else if (dr === 1 && dc === 0) arrow = "↓";
-      else if (dr === 0 && dc === -1) arrow = "←";
-      else if (dr === 0 && dc === 1) arrow = "→";
-      if (arrow) m.set(key(a.r, a.c), arrow);
+      if (dr === 0 && dc === 1) m.set(key(a.r, a.c), 0);
+      else if (dr === 1 && dc === 0) m.set(key(a.r, a.c), 90);
+      else if (dr === 0 && dc === -1) m.set(key(a.r, a.c), 180);
+      else if (dr === -1 && dc === 0) m.set(key(a.r, a.c), -90);
     }
     return m;
   }, [visiblePath]);
@@ -328,17 +410,6 @@ export default function PathfindingPlayground() {
     setAnimIndex(0);
   };
 
-  const buildForbid = (visitedGlobal: Set<CellKey>, sequence: Coord[], i: number) => {
-    const s = sequence[i], g = sequence[i + 1];
-    const forbid = new Set<CellKey>(visitedGlobal);
-    for (let j = i + 1; j < sequence.length; j++) {
-      forbid.add(key(sequence[j].r, sequence[j].c));
-    }
-    forbid.delete(key(s.r, s.c));
-    forbid.delete(key(g.r, g.c));
-    return forbid;
-  };
-
   const run = () => {
     clearPath();
     if (!start || !end) {
@@ -354,7 +425,6 @@ export default function PathfindingPlayground() {
       for (let i = 0; i < sequence.length - 1; i++) {
         const s = sequence[i], g = sequence[i + 1];
         const forbid = allowRevisit ? undefined : buildForbid(visitedGlobal, sequence, i);
-
         const res = bfs(n, blocked, s, g, forbid);
         if (!res.path) {
           alert(`No path for segment ${i + 1} under current constraints.`);
@@ -362,20 +432,18 @@ export default function PathfindingPlayground() {
         }
         if (i === 0) accum = res.path;
         else accum = [...accum, ...res.path.slice(1)];
-
         if (!allowRevisit) for (const p of res.path) visitedGlobal.add(key(p.r, p.c));
       }
       setPath(accum);
       return;
     }
 
-    const opt = optimizeOrder(n, blocked, start, required, end);
-    if (!("order" in opt) || !opt.order) {
-      alert(opt.reason || "Optimization failed.");
-      return;
-    }
-
     if (allowRevisit) {
+      const opt = optimizeOrderRevisitsOK(n, blocked, start, required, end);
+      if (!("order" in opt) || !opt.order) {
+        alert(opt.reason || "Optimization failed.");
+        return;
+      }
       try {
         const p = concatPaths(opt.pairPaths, opt.order);
         setPath(p);
@@ -393,23 +461,12 @@ export default function PathfindingPlayground() {
         setPath(accum);
       }
     } else {
-      let accum: Coord[] = [];
-      const visitedGlobal = new Set<CellKey>([key(start.r, start.c)]);
-
-      for (let i = 0; i < opt.order.length - 1; i++) {
-        const s = opt.order[i], g = opt.order[i + 1];
-        const forbid = buildForbid(visitedGlobal, opt.order, i);
-
-        const res = bfs(n, blocked, s, g, forbid);
-        if (!res.path) {
-          alert("No path under no-revisit constraint for the optimized order.");
-          return;
-        }
-        if (i === 0) accum = res.path;
-        else accum = [...accum, ...res.path.slice(1)];
-        for (const p of res.path) visitedGlobal.add(key(p.r, p.c));
+      const best = optimizeOrderNoRevisit(n, blocked, start, required, end);
+      if (!best) {
+        alert("No route satisfies the no-revisit constraint through all waypoints.");
+        return;
       }
-      setPath(accum);
+      setPath(best.path);
     }
   };
 
@@ -482,39 +539,42 @@ export default function PathfindingPlayground() {
         <div className="bg-white rounded-2xl p-3 shadow-sm select-none" onMouseLeave={onMouseUp} onMouseUp={onMouseUp}>
           <div className="grid" style={{ gridTemplateColumns: `repeat(${n}, minmax(0, 1fr))`, gap: 1 }}>
             {grid.flat().map((cell) => {
-  const arrow = arrowMap.get(cell.k);
-  return (
-    <div
-      key={cell.k}
-      onMouseDown={() => onMouseDown(cell.r, cell.c)}
-      onMouseEnter={() => onMouseEnter(cell.r, cell.c)}
-      className={
-        "relative aspect-square cursor-crosshair rounded-sm border " +
-        (cell.t === "blocked"
-          ? "bg-neutral-800 border-neutral-800"
-          : cell.t === "start"
-          ? "bg-green-500 border-green-600"
-          : cell.t === "end"
-          ? "bg-red-500 border-red-600"
-          : cell.t === "required"
-          ? "bg-amber-400 border-amber-500"
-          : cell.t === "path"
-          ? "bg-sky-400 border-sky-500"
-          : "bg-white border-neutral-200")
-      }
-      title={`${cell.r},${cell.c}`}
-    >
-      {arrow && (
-        <span
-          className="pointer-events-none absolute inset-0 grid place-items-center text-black font-extrabold leading-none text-base md:text-lg"
-          aria-hidden
-        >
-          {arrow}
-        </span>
-      )}
-    </div>
-  );
-})}
+              const deg = arrowDeg.get(cell.k);
+              return (
+                <div
+                  key={cell.k}
+                  onMouseDown={() => onMouseDown(cell.r, cell.c)}
+                  onMouseEnter={() => onMouseEnter(cell.r, cell.c)}
+                  className={
+                    "relative aspect-square cursor-crosshair rounded-sm border " +
+                    (cell.t === "blocked"
+                      ? "bg-neutral-800 border-neutral-800"
+                      : cell.t === "start"
+                      ? "bg-green-500 border-green-600"
+                      : cell.t === "end"
+                      ? "bg-red-500 border-red-600"
+                      : cell.t === "required"
+                      ? "bg-amber-400 border-amber-500"
+                      : cell.t === "path"
+                      ? "bg-sky-400 border-sky-500"
+                      : "bg-white border-neutral-200")
+                  }
+                  title={`${cell.r},${cell.c}`}
+                >
+                  {deg !== undefined && (
+                    <svg
+                      viewBox="0 0 100 100"
+                      className="pointer-events-none absolute inset-0 z-10"
+                      style={{ transform: `rotate(${deg}deg)`, transformOrigin: "50% 50%" }}
+                      aria-hidden
+                    >
+                      <line x1="20" y1="50" x2="72" y2="50" stroke="black" strokeWidth="10" strokeLinecap="round" />
+                      <polygon points="70,35 95,50 70,65" fill="black" />
+                    </svg>
+                  )}
+                </div>
+              );
+            })}
           </div>
         </div>
 
@@ -537,8 +597,7 @@ export default function PathfindingPlayground() {
           </div>
           <h3 className="font-semibold mt-3 mb-1">Notes</h3>
           <ul className="list-disc list-inside space-y-1">
-            <li>Pathfinding uses BFS with unit weights.</li>
-            <li>Optimize waypoints uses Held–Karp DP for exact order on small sets.</li>
+            <li>“Optimize waypoints” is exact under revisits, and exact over permutations when no-revisit is on.</li>
             <li>Export copies a JSON snapshot for reproducible demos.</li>
           </ul>
         </aside>
@@ -548,4 +607,3 @@ export default function PathfindingPlayground() {
     </div>
   );
 }
-
