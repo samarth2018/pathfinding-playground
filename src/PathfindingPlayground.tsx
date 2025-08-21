@@ -482,32 +482,39 @@ export default function PathfindingPlayground() {
         <div className="bg-white rounded-2xl p-3 shadow-sm select-none" onMouseLeave={onMouseUp} onMouseUp={onMouseUp}>
           <div className="grid" style={{ gridTemplateColumns: `repeat(${n}, minmax(0, 1fr))`, gap: 1 }}>
             {grid.flat().map((cell) => {
-              const arrow = arrowMap.get(cell.k);
-              return (
-                <div
-                  key={cell.k}
-                  onMouseDown={() => onMouseDown(cell.r, cell.c)}
-                  onMouseEnter={() => onMouseEnter(cell.r, cell.c)}
-                  className={
-                    "aspect-square cursor-crosshair rounded-sm border flex items-center justify-center " +
-                    (cell.t === "blocked"
-                      ? "bg-neutral-800 border-neutral-800"
-                      : cell.t === "start"
-                      ? "bg-green-500 border-green-600"
-                      : cell.t === "end"
-                      ? "bg-red-500 border-red-600"
-                      : cell.t === "required"
-                      ? "bg-amber-400 border-amber-500"
-                      : cell.t === "path"
-                      ? "bg-sky-400 border-sky-500"
-                      : "bg-white border-neutral-200")
-                  }
-                  title={`${cell.r},${cell.c}`}
-                >
-                  {arrow && <span className="text-black font-bold select-none text-[12px] sm:text-sm leading-none">{arrow}</span>}
-                </div>
-              );
-            })}
+  const arrow = arrowMap.get(cell.k);
+  return (
+    <div
+      key={cell.k}
+      onMouseDown={() => onMouseDown(cell.r, cell.c)}
+      onMouseEnter={() => onMouseEnter(cell.r, cell.c)}
+      className={
+        "relative aspect-square cursor-crosshair rounded-sm border " +
+        (cell.t === "blocked"
+          ? "bg-neutral-800 border-neutral-800"
+          : cell.t === "start"
+          ? "bg-green-500 border-green-600"
+          : cell.t === "end"
+          ? "bg-red-500 border-red-600"
+          : cell.t === "required"
+          ? "bg-amber-400 border-amber-500"
+          : cell.t === "path"
+          ? "bg-sky-400 border-sky-500"
+          : "bg-white border-neutral-200")
+      }
+      title={`${cell.r},${cell.c}`}
+    >
+      {arrow && (
+        <span
+          className="pointer-events-none absolute inset-0 grid place-items-center text-black font-extrabold leading-none text-base md:text-lg"
+          aria-hidden
+        >
+          {arrow}
+        </span>
+      )}
+    </div>
+  );
+})}
           </div>
         </div>
 
