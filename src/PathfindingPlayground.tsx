@@ -155,7 +155,7 @@ function optimizeOrder(
       seq.push(0);
       break;
     }
-    seq.push(st.prev);
+    seq.push(st.prev!); // non-null here by construction
     mask = mask & ~(1 << (cur - 1));
     cur = st.prev!;
   }
