@@ -2,7 +2,6 @@ import { useEffect, useMemo, useRef, useState } from "react";
 
 type Coord = { r: number; c: number };
 type Mode = "start" | "end" | "block" | "required" | "erase";
-type VisitOrder = "as-clicked" | "optimize";
 type CellKey = string;
 
 const key = (r: number, c: number): CellKey => `${r},${c}`;
@@ -27,251 +26,127 @@ function neighbors(n: number, { r, c }: Coord): Coord[] {
   return out;
 }
 
-function reconstructPath(parent: Map<CellKey, CellKey>, start: Coord, goal: Coord): Coord[] {
-  const path: Coord[] = [];
-  let cur: CellKey | undefined = key(goal.r, goal.c);
-  const sk = key(start.r, start.c);
-  while (cur && cur !== sk) {
-    path.push(fromKey(cur));
-    cur = parent.get(cur);
-  }
-  if (cur === sk) path.push(start);
-  return path.reverse();
-}
+/* -------------------- A* over expanded state space --------------------
+   State = (r, c, mask, visitedCells?) where:
+   - (r,c): position
+   - mask: bitmask of required waypoints visited so far
+   - visitedCells: only when no-revisit is enforced (tracks cells on the path)
+   Heuristic h(n) = 0 (requested) -> optimal but slower = Dijkstra on this state space
+------------------------------------------------------------------------ */
+type AStarNode = {
+  r: number;
+  c: number;
+  mask: number;
+  g: number;
+  f: number;
+  parent?: AStarNode;
+  visitedCells?: Set<CellKey>; // only used when allowRevisit=false
+};
 
-function bfs(
+function astarMulti(
   n: number,
   blocked: Set<CellKey>,
   start: Coord,
-  goal: Coord,
-  forbidden?: Set<CellKey>
-): { path: Coord[]; visited: CellKey[] } | { path: null; visited: CellKey[] } {
-  if (key(start.r, start.c) === key(goal.r, goal.c)) return { path: [start], visited: [] };
-  const q: Coord[] = [start];
-  const visited = new Set<CellKey>([key(start.r, start.c)]);
-  const order: CellKey[] = [key(start.r, start.c)];
-  const parent = new Map<CellKey, CellKey>();
-  const goalKey = key(goal.r, goal.c);
+  required: Coord[],
+  end: Coord,
+  allowRevisit: boolean
+): Coord[] | null {
+  const reqIndexByKey = new Map<CellKey, number>();
+  required.forEach((p, i) => reqIndexByKey.set(key(p.r, p.c), i));
+  const FULL = (1 << required.length) - 1;
 
-  while (q.length) {
-    const cur = q.shift()!;
-    for (const nb of neighbors(n, cur)) {
+  const startMask =
+    reqIndexByKey.has(key(start.r, start.c)) ? (1 << (reqIndexByKey.get(key(start.r, start.c))!)) : 0;
+
+  // If start is already at end and all required done
+  if (start.r === end.r && start.c === end.c && startMask === FULL) return [start];
+
+  const startNode: AStarNode = {
+    r: start.r,
+    c: start.c,
+    mask: startMask,
+    g: 0,
+    f: 0, // h = 0
+    parent: undefined,
+    visitedCells: allowRevisit ? undefined : new Set<CellKey>([key(start.r, start.c)]),
+  };
+
+  // open set (min by f); simple array is fine for our grids
+  const open: AStarNode[] = [startNode];
+
+  // best g seen for (r,c,mask) -> prune dominated states
+  const bestG = new Map<string, number>();
+  const stateKey = (r: number, c: number, mask: number) => `${r},${c}|${mask}`;
+  bestG.set(stateKey(start.r, start.c, startMask), 0);
+
+  while (open.length) {
+    // pop node with smallest f (linear scan; OK for demo sizes)
+    let bestIdx = 0;
+    for (let i = 1; i < open.length; i++) if (open[i].f < open[bestIdx].f) bestIdx = i;
+    const cur = open.splice(bestIdx, 1)[0];
+
+    // goal check: at end with all required visited
+    if (cur.r === end.r && cur.c === end.c && cur.mask === FULL) {
+      const out: Coord[] = [];
+      let p: AStarNode | undefined = cur;
+      while (p) {
+        out.push({ r: p.r, c: p.c });
+        p = p.parent;
+      }
+      return out.reverse();
+    }
+
+    // expand neighbors
+    for (const nb of neighbors(n, { r: cur.r, c: cur.c })) {
       const nbKey = key(nb.r, nb.c);
       if (blocked.has(nbKey)) continue;
-      if (forbidden && forbidden.has(nbKey)) continue;
-      if (visited.has(nbKey)) continue;
-      visited.add(nbKey);
-      order.push(nbKey);
-      parent.set(nbKey, key(cur.r, cur.c));
-      if (nbKey === goalKey) {
-        return { path: reconstructPath(parent, start, goal), visited: order };
-      }
-      q.push(nb);
+
+      // don't step on END until all required are done, to avoid early finishing or blocking
+      if (nb.r === end.r && nb.c === end.c && cur.mask !== FULL) continue;
+
+      // no-revisit constraint: path must be simple -> skip if already on our current path
+      if (!allowRevisit && cur.visitedCells!.has(nbKey)) continue;
+
+      // update mask when we visit a required waypoint
+      let nextMask = cur.mask;
+      const reqIdx = reqIndexByKey.get(nbKey);
+      if (reqIdx !== undefined) nextMask = nextMask | (1 << reqIdx);
+
+      const nextG = cur.g + 1;
+      const sk = stateKey(nb.r, nb.c, nextMask);
+      const prevBest = bestG.get(sk);
+      if (prevBest !== undefined && nextG >= prevBest) continue;
+
+      // heuristic h = 0 (as requested)
+      const nextH = 0;
+      const nextNode: AStarNode = {
+        r: nb.r,
+        c: nb.c,
+        mask: nextMask,
+        g: nextG,
+        f: nextG + nextH,
+        parent: cur,
+        visitedCells: allowRevisit
+          ? undefined
+          : (() => {
+              const s = new Set(cur.visitedCells);
+              s.add(nbKey);
+              return s;
+            })(),
+      };
+
+      bestG.set(sk, nextG);
+      open.push(nextNode);
     }
   }
-  return { path: null, visited: order };
+
+  return null; // no route
 }
 
-/* ---- Optimize order when revisits ARE allowed: Held–Karp DP over pairwise BFS ---- */
-function optimizeOrderRevisitsOK(
-  n: number,
-  blocked: Set<CellKey>,
-  start: Coord,
-  required: Coord[],
-  end: Coord
-): { order: Coord[]; pairPaths: Map<string, Coord[]> } | { order: null; reason: string } {
-  const allPoints = [start, ...required, end];
-  const K = allPoints.length;
-  const dist: number[][] = Array.from({ length: K }, () => Array(K).fill(Infinity));
-  const pairPaths = new Map<string, Coord[]>();
-
-  for (let i = 0; i < K; i++) {
-    for (let j = 0; j < K; j++) {
-      if (i === j) {
-        dist[i][j] = 0;
-        pairPaths.set(`${i}-${j}`, [allPoints[i]]);
-        continue;
-      }
-      const res = bfs(n, blocked, allPoints[i], allPoints[j]);
-      if (res.path) {
-        dist[i][j] = res.path.length - 1;
-        pairPaths.set(`${i}-${j}`, res.path);
-      } else {
-        dist[i][j] = Infinity;
-      }
-    }
-  }
-
-  for (let j = 1; j < K; j++) if (!isFinite(dist[0][j])) return { order: null, reason: "Unreachable waypoint/end." };
-
-  const R = required.length;
-  if (R === 0) return { order: [start, end], pairPaths };
-
-  const dp = new Map<string, { cost: number; prev: number | null }>();
-  for (let i = 1; i <= R; i++) {
-    const m = 1 << (i - 1);
-    dp.set(`${m},${i}`, { cost: dist[0][i], prev: 0 });
-  }
-
-  for (let mask = 1; mask < 1 << R; mask++) {
-    for (let i = 1; i <= R; i++) {
-      if (!(mask & (1 << (i - 1)))) continue;
-      const state = dp.get(`${mask},${i}`);
-      if (!state) continue;
-      for (let j = 1; j <= R; j++) {
-        if (mask & (1 << (j - 1))) continue;
-        const nextMask = mask | (1 << (j - 1));
-        const newCost = state.cost + dist[i][j];
-        const cur = dp.get(`${nextMask},${j}`);
-        if (isFinite(newCost) && (!cur || newCost < cur.cost)) {
-          dp.set(`${nextMask},${j}`, { cost: newCost, prev: i });
-        }
-      }
-    }
-  }
-
-  const full = (1 << R) - 1;
-  let bestCost = Infinity;
-  let bestLast = -1;
-  for (let i = 1; i <= R; i++) {
-    const st = dp.get(`${full},${i}`);
-    if (!st) continue;
-    const total = st.cost + dist[i][K - 1];
-    if (total < bestCost) {
-      bestCost = total;
-      bestLast = i;
-    }
-  }
-  if (!isFinite(bestCost) || bestLast === -1) return { order: null, reason: "No complete route to end via all waypoints." };
-
-  const seq: number[] = [K - 1, bestLast];
-  let mask = full;
-  let cur = bestLast;
-  while (mask) {
-    const st = dp.get(`${mask},${cur}`)!;
-    if (st.prev === 0) {
-      seq.push(0);
-      break;
-    }
-    seq.push(st.prev!);
-    mask = mask & ~(1 << (cur - 1));
-    cur = st.prev!;
-  }
-  seq.reverse();
-  const order: Coord[] = seq.map((idx) => allPoints[idx]);
-  return { order, pairPaths };
-}
-
-/* ---- Concatenate precomputed pairPaths for a chosen order ---- */
-function concatPaths(pairPaths: Map<string, Coord[]>, order: Coord[]): Coord[] {
-  const out: Coord[] = [];
-  for (let i = 0; i < order.length - 1; i++) {
-    const a = order[i];
-    const b = order[i + 1];
-    let seg: Coord[] | undefined = undefined;
-    for (const [, v] of pairPaths.entries()) {
-      const ia = v[0];
-      const ib = v[v.length - 1];
-      if (ia.r === a.r && ia.c === a.c && ib.r === b.r && ib.c === b.c) {
-        seg = v;
-        break;
-      }
-    }
-    if (!seg) throw new Error("Missing segment in pairPaths");
-    if (i === 0) out.push(...seg);
-    else out.push(...seg.slice(1));
-  }
-  return out;
-}
-
-/* ---- Helpers for no-revisit mode ---- */
-function buildForbid(visitedGlobal: Set<CellKey>, sequence: Coord[], i: number) {
-  const s = sequence[i], g = sequence[i + 1];
-  const forbid = new Set<CellKey>(visitedGlobal);
-  for (let j = i + 1; j < sequence.length; j++) forbid.add(key(sequence[j].r, sequence[j].c));
-  forbid.delete(key(s.r, s.c));
-  forbid.delete(key(g.r, g.c));
-  return forbid;
-}
-
-function* permutations<T>(arr: T[]): Generator<T[]> {
-  const a = arr.slice();
-  const n = a.length;
-  const c = Array(n).fill(0);
-  yield a.slice();
-  let i = 0;
-  while (i < n) {
-    if (c[i] < i) {
-      if (i % 2 === 0) [a[0], a[i]] = [a[i], a[0]];
-      else [a[c[i]], a[i]] = [a[i], a[c[i]]];
-      yield a.slice();
-      c[i] += 1;
-      i = 0;
-    } else {
-      c[i] = 0;
-      i += 1;
-    }
-  }
-}
-
-/* ---- Optimize order when revisits are NOT allowed: exact search over waypoint orders ---- */
-function optimizeOrderNoRevisit(
-  n: number,
-  blocked: Set<CellKey>,
-  start: Coord,
-  required: Coord[],
-  end: Coord
-): { order: Coord[]; path: Coord[] } | null {
-  const R = required.length;
-  if (R === 0) {
-    const seg = bfs(n, blocked, start, end, new Set([key(start.r, start.c)]));
-    return seg.path ? { order: [start, end], path: seg.path } : null;
-  }
-
-  // Hard cap for combinatorics; adjust as desired
-  if (R > 9) {
-    alert("Too many required waypoints for exact no-revisit optimization (max 9). Try fewer waypoints or enable revisiting.");
-    return null;
-  }
-
-  let bestPath: Coord[] | null = null;
-  let bestOrder: Coord[] | null = null;
-
-  for (const perm of permutations(required)) {
-    const sequence = [start, ...perm, end];
-    const visitedGlobal = new Set<CellKey>([key(start.r, start.c)]);
-    let ok = true;
-    let accum: Coord[] = [];
-
-    for (let i = 0; i < sequence.length - 1; i++) {
-      const s = sequence[i], g = sequence[i + 1];
-      const forbid = buildForbid(visitedGlobal, sequence, i);
-      const res = bfs(n, blocked, s, g, forbid);
-      if (!res.path) {
-        ok = false;
-        break;
-      }
-      if (i === 0) accum = res.path;
-      else accum = [...accum, ...res.path.slice(1)];
-      for (const p of res.path) visitedGlobal.add(key(p.r, p.c));
-    }
-
-    if (ok) {
-      if (!bestPath || accum.length < bestPath.length) {
-        bestPath = accum;
-        bestOrder = sequence;
-      }
-    }
-  }
-
-  if (bestPath && bestOrder) return { order: bestOrder, path: bestPath };
-  return null;
-}
-
+/* -------------------- Component -------------------- */
 export default function PathfindingPlayground() {
   const [n, setN] = useState<number>(20);
   const [mode, setMode] = useState<Mode>("block");
-  const [visitOrder, setVisitOrder] = useState<VisitOrder>("as-clicked");
   const [animate, setAnimate] = useState<boolean>(true);
   const [allowRevisit, setAllowRevisit] = useState<boolean>(true);
   const [start, setStart] = useState<Coord | null>(null);
@@ -279,6 +154,7 @@ export default function PathfindingPlayground() {
   const [blocked, setBlocked] = useState<Set<CellKey>>(new Set());
   const [required, setRequired] = useState<Coord[]>([]);
   const [isMouseDown, setIsMouseDown] = useState(false);
+
   const [path, setPath] = useState<Coord[]>([]);
   const [animIndex, setAnimIndex] = useState<number>(0);
   const animRef = useRef<number | null>(null);
@@ -306,13 +182,9 @@ export default function PathfindingPlayground() {
     () => path.slice(0, animate ? animIndex : path.length),
     [path, animIndex, animate]
   );
+  const pathSet = useMemo(() => new Set(visiblePath.map((p) => key(p.r, p.c))), [visiblePath]);
 
-  const pathSet = useMemo(
-    () => new Set(visiblePath.map((p) => key(p.r, p.c))),
-    [visiblePath]
-  );
-
-  // map each step's FROM-cell -> rotation degrees for an SVG arrow (base points right)
+  // build arrow rotation (deg) for each "from" step in the visible path
   const arrowDeg = useMemo(() => {
     const m = new Map<CellKey, number>();
     for (let i = 0; i < visiblePath.length - 1; i++) {
@@ -320,10 +192,10 @@ export default function PathfindingPlayground() {
       const b = visiblePath[i + 1];
       const dr = b.r - a.r;
       const dc = b.c - a.c;
-      if (dr === 0 && dc === 1) m.set(key(a.r, a.c), 0);
-      else if (dr === 1 && dc === 0) m.set(key(a.r, a.c), 90);
-      else if (dr === 0 && dc === -1) m.set(key(a.r, a.c), 180);
-      else if (dr === -1 && dc === 0) m.set(key(a.r, a.c), -90);
+      if (dr === 0 && dc === 1) m.set(key(a.r, a.c), 0);       // →
+      else if (dr === 1 && dc === 0) m.set(key(a.r, a.c), 90); // ↓
+      else if (dr === 0 && dc === -1) m.set(key(a.r, a.c), 180); // ←
+      else if (dr === -1 && dc === 0) m.set(key(a.r, a.c), -90); // ↑
     }
     return m;
   }, [visiblePath]);
@@ -416,58 +288,12 @@ export default function PathfindingPlayground() {
       alert("Please set both Start and End.");
       return;
     }
-
-    if (visitOrder === "as-clicked") {
-      const sequence: Coord[] = [start, ...required, end];
-      let accum: Coord[] = [];
-      const visitedGlobal = new Set<CellKey>([key(start.r, start.c)]);
-
-      for (let i = 0; i < sequence.length - 1; i++) {
-        const s = sequence[i], g = sequence[i + 1];
-        const forbid = allowRevisit ? undefined : buildForbid(visitedGlobal, sequence, i);
-        const res = bfs(n, blocked, s, g, forbid);
-        if (!res.path) {
-          alert(`No path for segment ${i + 1} under current constraints.`);
-          return;
-        }
-        if (i === 0) accum = res.path;
-        else accum = [...accum, ...res.path.slice(1)];
-        if (!allowRevisit) for (const p of res.path) visitedGlobal.add(key(p.r, p.c));
-      }
-      setPath(accum);
+    const p = astarMulti(n, blocked, start, required, end, allowRevisit);
+    if (!p) {
+      alert("No route under current constraints.");
       return;
     }
-
-    if (allowRevisit) {
-      const opt = optimizeOrderRevisitsOK(n, blocked, start, required, end);
-      if (!("order" in opt) || !opt.order) {
-        alert(opt.reason || "Optimization failed.");
-        return;
-      }
-      try {
-        const p = concatPaths(opt.pairPaths, opt.order);
-        setPath(p);
-      } catch {
-        let accum: Coord[] = [];
-        for (let i = 0; i < opt.order.length - 1; i++) {
-          const res = bfs(n, blocked, opt.order[i], opt.order[i + 1]);
-          if (!res.path) {
-            alert("A segment in optimized order is unreachable.");
-            return;
-          }
-          if (i === 0) accum = res.path;
-          else accum = [...accum, ...res.path.slice(1)];
-        }
-        setPath(accum);
-      }
-    } else {
-      const best = optimizeOrderNoRevisit(n, blocked, start, required, end);
-      if (!best) {
-        alert("No route satisfies the no-revisit constraint through all waypoints.");
-        return;
-      }
-      setPath(best.path);
-    }
+    setPath(p);
   };
 
   const exportState = () => {
@@ -510,13 +336,6 @@ export default function PathfindingPlayground() {
           <label className="text-sm">Grid</label>
           <input type="range" min={8} max={48} value={n} onChange={(e) => setN(parseInt(e.target.value))} />
           <span className="text-sm w-10 text-center">{n}×{n}</span>
-        </div>
-        <div className="flex items-center gap-2">
-          <label className="text-sm">Order</label>
-          <select className="px-2 py-1 rounded-xl border bg-white" value={visitOrder} onChange={(e) => setVisitOrder(e.target.value as VisitOrder)}>
-            <option value="as-clicked">As-clicked (sequence)</option>
-            <option value="optimize">Optimize waypoints</option>
-          </select>
         </div>
         <label className="flex items-center gap-2 text-sm">
           <input type="checkbox" checked={animate} onChange={(e) => setAnimate(e.target.checked)} />
@@ -585,7 +404,7 @@ export default function PathfindingPlayground() {
             <li>Select <span className="font-medium">End</span> and click a cell.</li>
             <li>Draw <span className="font-medium">Block</span> walls (drag to paint).</li>
             <li>Mark <span className="font-medium">Required</span> waypoints (must-visit).</li>
-            <li>Choose visit order and press <span className="font-medium">Run</span>.</li>
+            <li>Press <span className="font-medium">Run</span> to compute the optimal path (A* with h=0).</li>
           </ol>
           <h3 className="font-semibold mt-3 mb-1">Legend</h3>
           <div className="flex flex-wrap gap-2 items-center">
@@ -597,13 +416,14 @@ export default function PathfindingPlayground() {
           </div>
           <h3 className="font-semibold mt-3 mb-1">Notes</h3>
           <ul className="list-disc list-inside space-y-1">
-            <li>“Optimize waypoints” is exact under revisits, and exact over permutations when no-revisit is on.</li>
-            <li>Export copies a JSON snapshot for reproducible demos.</li>
+            <li>A* runs on (row, col, required-mask) with h(n)=0 (optimal).</li>
+            <li>“Allow revisiting cells” off enforces a simple path (no cell used twice).</li>
+            <li>Arrows show the final optimal path direction.</li>
           </ul>
         </aside>
       </section>
 
-      <footer className="text-xs text-neutral-500 pt-1">Built for CV demos • Extend with weighted cells, diagonal moves, or RL training.</footer>
+      <footer className="text-xs text-neutral-500 pt-1">Built for CV demos • Try adding Manhattan heuristic or MST lower bound for speed.</footer>
     </div>
   );
 }
