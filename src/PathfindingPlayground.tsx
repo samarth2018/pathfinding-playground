@@ -5,10 +5,7 @@ type Mode = "start" | "end" | "block" | "required" | "erase";
 type CellKey = string;
 
 const key = (r: number, c: number): CellKey => `${r},${c}`;
-const fromKey = (k: CellKey): Coord => {
-  const [r, c] = k.split(",").map(Number);
-  return { r, c };
-};
+
 
 function neighbors(n: number, { r, c }: Coord): Coord[] {
   const dirs = [
