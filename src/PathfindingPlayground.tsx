@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 
 type Coord = { r: number; c: number };
 type Mode = "start" | "end" | "block" | "required" | "erase";
